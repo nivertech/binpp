@@ -1,0 +1,13 @@
+%%% -*- mode: erlang -*-
+%% @author Zvi Avraham <zvi@nivertech.com>
+%% @copyright 2012 Nivertech (Nywhere Tech Ltd)
+
+{application, binpp,
+		[
+				{description, "Binary Pretty-Printer"},
+				{vsn, "1.0.0"},
+				{modules, []},
+				{applications, []},
+				{env, []}
+		]
+}.

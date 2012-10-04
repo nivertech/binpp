@@ -14,9 +14,14 @@
 
 -module(binpp).
 -author('Adam Rutkowski adam@mtod.org').
--export([pprint/1]).
+-export([pprint/1, pprint/2, pprint/3]).
+-export([cmprint/2]).
+-export([from_str/1, from_str/2]).
 -export([format/1, format/2]).
 -export([convert/1, convert/2]).
+
+-opaque opt() :: {return, iolist} | {return, binary} | {printer, function()}.
+-opaque opts() :: list(opt()).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %                                   API                                   %
@@ -24,46 +29,95 @@
 
 -spec convert(binary(), atom()) -> {ok, list()}.
 
-convert(Bin, hex) when is_binary(Bin) ->
+convert(Bin, hex) when is_binary(Bin) orelse is_bitstring(Bin) ->
     convert(Bin, [], fun hexstr/1);
 
-convert(Bin, bin) when is_binary(Bin) ->
+convert(Bin, bin) when is_binary(Bin) orelse is_bitstring(Bin) ->
     convert(Bin, [], fun binstr/1).
 
 -spec convert(binary()) -> {ok, list()}.
 
 convert(Bin) when is_binary(Bin) ->
-    convert(Bin).
+    convert(Bin, hex).
 
 -spec format(binary(), atom()) -> ok.
 
 format(Bin, Base) ->
     {ok, Octets} = convert(Bin, Base),
-    io:format("~p~n", [string:join(Octets, " ")]),
-    ok.
+    io:format("~p~n", [string:join(Octets, " ")]).
 
 -spec format(binary()) -> ok.
 
 format(Bin) ->
-    format(Bin, hex),
-    ok.
+    format(Bin, hex).
 
 -spec pprint(binary()) -> ok.
 
 pprint(Bin) ->
+    pprint(Bin, []).
+
+-spec pprint(binary(), opts()) -> ok | any().
+
+pprint(Bin, Opts) when is_list(Opts) ->
     {ok, Octets} = convert(Bin, hex),
     Buckets = buckets(16, Octets),
-    lists:foreach(fun print_bucket/1, Buckets),
-    ok.
+    apply_opts(lists:map(fun print_bucket/1, Buckets), Opts).
 
+-spec pprint(binary(), {non_neg_integer(), non_neg_integer()},
+             opts()) -> ok | any().
+
+pprint(Bin, {Pos, Len}, Opts) when Len =< size(Bin) ->
+    pprint(binary:part(Bin, Pos, Len), Opts);
+pprint(Bin, {Pos, _}, Opts) ->
+    pprint(binary:part(Bin, Pos, size(Bin)-Pos), Opts).
+
+-spec cmprint(binary(), binary()) -> ok.
+
+cmprint(Bin1, Bin2) when is_binary(Bin1) orelse is_bitstring(Bin1),
+                         is_binary(Bin2) orelse is_bitstring(Bin2) ->
+    {ok, Octets1} = convert(Bin1, hex),
+    {ok, Octets2} = convert(Bin2, hex),
+    {ok, {D1, D2}} = diff(Octets1, Octets2),
+    print_comparsion(buckets(16, D1), buckets(16, D2)).
+
+-spec from_str(string(), hex) -> binary().
+
+from_str(Str, hex) when is_list(Str) ->
+    Bytes = case lists:member($ , Str) of
+                true ->
+                    string:tokens(Str, " ");
+                false when length(Str) rem 2 =:= 0 ->
+                    buckets(2, Str)
+            end,
+    list_to_binary([list_to_integer(B, 16) || B <- Bytes]).
+
+-spec from_str(string()) -> binary().
+
+from_str(Str) when is_list(Str) ->
+    from_str(Str, hex).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %                                 Core :)                                 %
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+apply_opts(IoList, []) ->
+    io:format("~s~n", [IoList]);
+apply_opts(IoList, [{return, iolist}]) ->
+    IoList;
+apply_opts(IoList, [{return, binary}]) ->
+    iolist_to_binary(IoList);
+apply_opts(IoList, [{printer, Fun}]) when is_function(Fun) ->
+    Fun(IoList);
+apply_opts(_, _) -> erlang:error(badarg).
 
 convert(<<>>, Acc, _) ->
     {ok, lists:reverse(Acc)};
+
+%% byte align bistring() to make a complementary binary()
+convert(Bin, [], FormatFun) when is_bitstring(Bin), not is_binary(Bin) ->
+    Align = (8 - (bit_size(Bin) rem 8)),
+    io:format("Warning! Aligned bitstring with ~.10B bit(s).~n", [Align]),
+    convert(<<Bin/binary, 0:Align>>, [], FormatFun);
 
 convert(<<Bin:8/integer, Rest/binary>>, SoFar, FormatFun) ->
     convert(Rest, [FormatFun(Bin)|SoFar], FormatFun).
@@ -78,7 +132,31 @@ print_bucket(Bucket) ->
                 end
             end,
             Bucket),
-    io:format("~s ~s~n", [string:left(OctetLine, 16*2 + 16, $ ), OctetRepr]).
+    io_lib:format("~s ~s~n", [string:left(OctetLine, 16*2 + 16, $ ), OctetRepr]).
+
+print_comparsion([], []) ->
+    ok;
+
+print_comparsion([L|LRest], [R|RRest]) ->
+    Zfill = fun(Line) -> string:left(Line, 16*2 + 16, $ ) end,
+    DiffL = Zfill(string:join(L, " ")),
+    DiffR = Zfill(string:join(R, " ")),
+    io:format("~s  ~s~n", [DiffL, DiffR]),
+    print_comparsion(LRest, RRest).
+
+diff([], [], LD, RD) ->
+    {ok, {lists:reverse(LD), lists:reverse(RD)}};
+diff([], [H2|R2], LD, RD) ->
+    diff([], R2, ["??"|LD], [H2|RD]);
+diff([H1|R1], [], LD, RD) ->
+    diff(R1, [], [H1|LD], ["??"|RD]);
+diff([H1|R1], [H2|R2], LD, RD) when H1 =:= H2 ->
+    diff(R1, R2, ["--"|LD], ["--"|RD]);
+diff([H1|R1], [H2|R2], LD, RD) ->
+     diff(R1, R2, [H1|LD], [H2|RD]).
+
+diff(L1, L2) when is_list(L1), is_list(L2) ->
+    diff(L1, L2, [], []).
 
 hexstr(B) -> string:right(integer_to_list(B, 16), 2, $0).
 binstr(B) -> string:right(integer_to_list(B, 2), 8, $0).
@@ -95,4 +173,3 @@ buckets(N, N, M, [H|T], [A|Acc]) ->
     buckets(1, N, M-1, T, [[], lists:reverse([H|A]) | Acc]);
 buckets(X, N, M, [H|T], [A|Acc]) ->
     buckets(X+1, N, M, T, [[H|A]|Acc]).
-
